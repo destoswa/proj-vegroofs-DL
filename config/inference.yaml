@@ -1,25 +1,27 @@
 inference:
-  working_directory: D:/GitHubProjects/STDL_Classifier_new
+  working_directory: STDL_Classifier
   inputs:
-    polygon_src: ./data/inference/infs_concat_roofs_join_green.gpkg
-    rasters_dir: ./data/inference/tiles_inference
-    class_labels_dir: ./data/sources/class_labels_multi.csv
-    model_src: ./models/inference/model.tar
+    polygon_src: ./data/inferences/infs_concat_roofs_join_green.gpkg
+    rasters_dir: ./data/inferences/tiles_inference
+    class_labels_dir: ./data/sources/class_labels_binary.csv
+    model_src: ./models/inference/model_binary.tar
   outputs:
     dataset_dir: ./data/inference/dataset
     preds_dir: ./results/inferences
-    folder_name_suffix: test
+    folder_name_suffix: model_scratch_20241114_with_conf_binary
   processes:
     do_preprocessing: True
   parameters:
     data_frac: 1.0
-    mode: multi
+    mode: binary
   preprocess_overright:
     processes:
+      do_rangelimit: False
+      do_mask: False
+      do_smooth_mask: False
       do_drop_overlapping: False
       do_drop_based_on_ndvi: False
     metadata:
-      batch_size: 500
       sample_size: 512
       rangelimit_mode: none
       rangelimit_threshold: 10000
@@ -27,8 +29,9 @@ inference:
       max_workers: 0
   train_overright:
     norm_boundaries: [[0,255],[0,255],[0,255],[0,255],[-1,1],[0,765]]
-    batch_size: 16
+    batch_size: 8
     num_workers: 8
+    backbone: convslayers
     backbone_num_levels: 3
-    backbone_num_layers: 1
+    backbone_num_layers: 3
     aspp_atrous_rates: [4, 8, 12] 

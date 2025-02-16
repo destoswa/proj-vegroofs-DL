@@ -1,20 +1,19 @@
 training:
-  working_directory: D:/GitHubProjects/STDL_Classifier_test_2/proj_vegroofs_dl
   inputs:
-   dataset_root: data/dataset_test
-   pretrained_src: DL/models/model.tar
+   dataset_root: data/dataset_global_stats
   outputs:
     res_dir: results/trainings/
-    folder_name_suffix: test
+    folder_name_suffix: test_gs_gradient_all_together
   processes:
     do_preprocessing: False  # only working with single trainings
+    do_gradient_tracking: True
   parameters:
     norm_boundaries: [[0,255],[0,255],[0,255],[0,255],[-1,1],[0,765]]
-    data_frac: 0.1
+    data_frac: 1.0
     train_frac: 0.7
-    num_epochs: 2
-    batch_size: 4
-    num_workers: 4
+    num_epochs: 5
+    batch_size: 16
+    num_workers: 8
     learning_rate: 0.0001
     weight_decay: 0.0001
     from_pretrained: False
@@ -23,7 +22,9 @@ training:
 
   model:
     model_type: multi # to choose in ["multi", "binary"]
+    backbone: convslayers  # to choose in ["convslayers"]
     backbone_num_levels: 3
-    backbone_num_layers: 1
+    backbone_num_layers: 3
     aspp_atrous_rates: [4, 8, 12] 
     dropout_frac: 0.0
+    model_src: "src/models/DeepLabV3Classificator.py" # useless for now

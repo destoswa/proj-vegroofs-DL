@@ -1,15 +1,14 @@
-import sys
 from matplotlib import pyplot as plt
+from matplotlib import cm
 import numpy as np
+from loguru import logger
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, fbeta_score, recall_score, precision_score
 import seaborn as sns
 import pandas as pd
 import pickle
 import warnings
-from scipy.ndimage import uniform_filter1d
-if __name__=='__main__':
-    sys.path.insert(0, 'D:\GitHubProjects\STDL_Classifier_uncertainty')
-from src.uncertainty_utils import brier_score_multiclass, expected_calibration_error, average_prediction_entropy, multiclass_nll, uncertainty_aware_accuracy
+import torch
+from scipy.interpolate import UnivariateSpline
 import os
 
 # LOADING DATA
@@ -41,7 +40,7 @@ def show_log_train(data, target_src, do_save=True, do_show=False):
     fig, axs = plt.subplots(2, 1, sharex=True)
 
     # splines
-    """spline_train_loss = UnivariateSpline(ls_epochs, ls_train_loss, s=1)
+    spline_train_loss = UnivariateSpline(ls_epochs, ls_train_loss, s=1)
     spline_val_loss = UnivariateSpline(ls_epochs, ls_val_loss, s=1)
     spline_train_acc = UnivariateSpline(ls_epochs, ls_train_acc, s=1)
     spline_val_acc = UnivariateSpline(ls_epochs, ls_val_acc, s=1)
@@ -49,27 +48,13 @@ def show_log_train(data, target_src, do_save=True, do_show=False):
     y_smooth_train_loss = spline_train_loss(x_smooth) 
     y_smooth_val_loss = spline_val_loss(x_smooth) 
     y_smooth_train_acc = spline_train_acc(x_smooth) 
-    y_smooth_val_acc = spline_val_acc(x_smooth) """
-
-    # moving window
-    n = 5
-    num_rep = 5
-    y_smooth_train_loss = uniform_filter1d(ls_train_loss, size=n)
-    y_smooth_val_loss = uniform_filter1d(ls_val_loss, size=n)
-    y_smooth_train_acc = uniform_filter1d(ls_train_acc, size=n)
-    y_smooth_val_acc = uniform_filter1d(ls_val_acc, size=n)
-
-    for i in range(num_rep - 1):
-        y_smooth_train_loss = uniform_filter1d(y_smooth_train_loss, size=n)
-        y_smooth_val_loss = uniform_filter1d(y_smooth_val_loss, size=n)
-        y_smooth_train_acc = uniform_filter1d(y_smooth_train_acc, size=n)
-        y_smooth_val_acc = uniform_filter1d(y_smooth_val_acc, size=n)
+    y_smooth_val_acc = spline_val_acc(x_smooth) 
 
     # plot accuracies
     axs[0].plot(ls_epochs, ls_train_acc, label='train', alpha=0.3)
     axs[0].plot(ls_epochs, ls_val_acc, label='eval', alpha=0.3)
-    axs[0].plot(ls_epochs, y_smooth_train_acc, color="#1f77b4", label='_nolegend_', linewidth=1.5)
-    axs[0].plot(ls_epochs, y_smooth_val_acc, color="#ff7f0e", label='_nolegend_', linewidth=1.5)
+    axs[0].plot(x_smooth, y_smooth_train_acc, color="#1f77b4", label='_nolegend_', linewidth=2)
+    axs[0].plot(x_smooth, y_smooth_val_acc, color="#ff7f0e", label='_nolegend_', linewidth=2)
     axs[0].set_title('Accuracy')
     axs[0].set_ylabel('Accuracy value [-]')
     axs[0].set_ylim(None, 1.0)
@@ -78,8 +63,8 @@ def show_log_train(data, target_src, do_save=True, do_show=False):
     # plot losses
     axs[1].plot(ls_epochs, ls_train_loss, label='train', alpha=0.3)
     axs[1].plot(ls_epochs, ls_val_loss, label='eval', alpha=0.3)
-    axs[1].plot(ls_epochs, y_smooth_train_loss, color="#1f77b4", label='_nolegend_', linewidth=1.5)
-    axs[1].plot(ls_epochs, y_smooth_val_loss, color="#ff7f0e", label='_nolegend_', linewidth=1.5)
+    axs[1].plot(x_smooth, y_smooth_train_loss, color="#1f77b4", label='_nolegend_', linewidth=2)
+    axs[1].plot(x_smooth, y_smooth_val_loss, color="#ff7f0e", label='_nolegend_', linewidth=2)
     axs[1].set_title('Loss')
     axs[1].set_xlabel('Epoch')
     axs[1].set_ylabel('Loss value [-]')
@@ -382,16 +367,19 @@ def show_one_var_combinatory_all_metrics(target_src, data: dict, title, tested_v
     warnings.filterwarnings('ignore')
     metrics_order =  ['OA', 'Recall', 'F2', 'F1', 'F05', 'Precision']
     data = data.set_index('metric').loc[metrics_order].reset_index()
-    print(data)
-    fig, ax = plt.subplots()
-    sns.lineplot(data=data, x='metric', y='best_val', hue=tested_var, marker='s', linestyle='dotted', palette=distinct_colors, ax=ax)
+    val_min = data.best_val.min()
+    val_max = data.best_val.max()
+    fig = plt.figure()
+    #sns.lineplot(data=data, x=tested_var, y='best_val', hue='metric', marker='s', linestyle='dotted', palette=distinct_colors, ax=ax)
+    sns.barplot(x='metric', y='best_val', hue=tested_var, data=data, palette=sns.color_palette())
     plt.title(title)
+    plt.ylim([max(0, val_min - 0.1), min(100, val_max + 0.1)])
     plt.xlabel('Metrics')
     plt.ylabel('Best val [-]')
     plt.tight_layout()
 
     if do_save:
-        plt.savefig(target_src)
+        plt.savefig(os.path.join(target_src,"one_var_results_all_metrics.png"))
 
     if do_show:
         plt.show()
@@ -399,79 +387,82 @@ def show_one_var_combinatory_all_metrics(target_src, data: dict, title, tested_v
     plt.close()
 
 
-def show_uncertainty(dict_preds_conf, target_src, do_show=True, do_save=False):
-    epochs = dict_preds_conf.keys()
-    dict_scores = {
-        'Brier score': [],
-        'ECE': [],
-        'APE': [],
-        'NLL': [],
-        'UAA': [],
-    }
-    for dict in dict_preds_conf.values():
-        targets = np.array(dict['val']['target'])
-        preds = np.array(dict['val']['pred'])
-        preds_conf = np.array(dict['val']['pred_conf'])
-        
-        dict_scores['Brier score'].append(brier_score_multiclass(y_true=targets, y_pred=preds_conf))
-        dict_scores['ECE'].append(expected_calibration_error(y_true=targets, y_pred_lbl=preds, y_pred=preds_conf))
-        dict_scores['APE'].append(average_prediction_entropy(pred_probs=preds_conf))
-        dict_scores['NNL'].append(multiclass_nll(y_true=targets, y_pred=preds_conf))
-        dict_scores['UAA'].append(uncertainty_aware_accuracy(predicted_labels=preds, pred_probs=preds_conf, true_labels=targets)[0])
-
-    min_brier = min(dict_scores['Brier score'])
-    min_ECE = min(dict_scores['ECE'])
-    min_APE = min(dict_scores['APE'])
-    min_NNL = min(dict_scores['NNL'])
-    max_UAA = max(dict_scores['UAA'])
-    fig, axs = plt.subplots(3, 2)
-    for idx, (score_name, score_val) in enumerate(dict_scores.items()):
-        num_row = idx % 3
-        num_col = idx // 3
-        ax = axs[num_row, num_col]
-        ax.plot(epochs, score_val)
-        ax.set_title(score_name)
-        ax.grid()
-    axs[2,1].text(0.05, 0.85, f"Min Brier score : {round(min_brier, 3)}", color='g', fontsize=8)
-    axs[2,1].text(0.05, 0.65, f"Min Expected Calibration Error : {round(min_ECE, 3)}", color='g', fontsize=8)
-    axs[2,1].text(0.05, 0.45, f"Min Average Prediction Entropy: {round(min_APE, 3)}", color='g', fontsize=8)
-    axs[2,1].text(0.05, 0.25, f"Min Negative Log-likelihood : {round(min_NNL, 3)}", color='g', fontsize=8)
-    axs[2,1].text(0.05, 0.05, f"Max Uncertainty-Aware Acc : {round(max_UAA, 3)}", color='g', fontsize=8)
-    axs[2,1].set_xticks([])
-    axs[2,1].set_yticks([])
-    axs[2,1].set_title("Best value for each score")
-    fig.suptitle("Measure of uncertainty")
+def show_gradient(gradient_data, target_src, do_save=True, do_show=False):
+    fig, axs = plt.subplots(3,2, figsize=(8, 12))
+    for i, (module, grads) in enumerate(gradient_data.items()):
+        ax = axs[i//2, i%2]
+        # Flatten and concatenate all gradients collected
+        #all_grads = torch.cat([g.view(-1) for g in grads]).numpy()
+        y,x,_ = ax.hist(grads, bins=50)
+        max = np.max(grads)
+        min = np.min(grads)
+        mean = np.mean(grads)
+        abs_mean = np.mean(np.abs(grads))
+        median = np.median(grads)
+        text = "Stats:\n min: {:.2e}\n max: {:.2e}\n avg: {:.2e}\n med: {:.2e}\n |avg|: {:.2}".format(min, max, mean, median, abs_mean)
+        ax.text(x.min(), y.max() * 0.7,text )
+        ax.set_title(f"Gradient Histogram for {module}")
     plt.tight_layout()
-
+    
     if do_save:
         plt.savefig(target_src)
 
     if do_show:
         plt.show()
 
-    plt.close()
-
 
 if __name__ == "__main__":
-    # show uncertainty results
-    src = r"D:\GitHubProjects\STDL_Classifier_uncertainty\results\trainings\20250121_num_epoch_3_frac_10_test_8\logs\samp_logs.pickle"
-    target_src = r"D:\GitHubProjects\STDL_Classifier_uncertainty\results\trainings\20250121_num_epoch_3_frac_10_test_8\images\uncertainty.png"
-    with open(src,'rb') as file:
-        preds_conf = pickle.load(file)
-    
-    show_uncertainty(preds_conf, target_src, True, False)
-    quit()
-
     # load results
     conf_mat_src = "./logs/MSPP_num_epoch_50_250924/conf_mats/conf_mat_4.csv"
     metric_train_src = "./logs/MSPP_num_epoch_50_250924/metrics_train.csv"
     metric_val_src = "./results/trainings/20241010_num_epoch_10_frac_10_test/logs/metrics_val.csv"
     metric_test_prec_rec_src = './results/trainings/20241010_num_epoch_10_frac_10_test/logs/metrics_train.csv'
+
+    # show gradients
+    src_folder = r"D:\GitHubProjects\STDL_Classifier\results\trainings\20241217_num_epoch_1_frac_100_test_gs_gradient_original"
+    with open(os.path.join(src_folder + "/logs", "gradient_logs.pickle"), 'rb') as inputfile:
+        gradient_data = pickle.load(inputfile)
+
+    show_gradient(
+        gradient_data=gradient_data,
+        target_src= os.path.join(src_folder + "/images", 'gradients.png'),
+        do_save=True,
+        do_show=True,
+    )
+
+    quit()
+
+    # show one_var 
+    src_folder = "./results/trainings_archive/MULTI_20241130_sample_size_threshold"
+    var_name = "sample_size_threshold"
+    list_images = [
+        ("F1", "best_F1.csv", "one_var_results_F1.png"),
+        ("F2", "best_F2.csv", "one_var_results_F2.png"),
+        ("F05", "best_F05.csv", "one_var_results_F05.png"),
+        ("OA", "best_OA.csv", "one_var_results_OA.png"),
+        ("Precision", "best_Precision.csv", "one_var_results_Precision.png"),
+        ("Recall", "best_Recall.csv", "one_var_results_Recall.png"),
+    ]
+    data_all_metrics = pd.DataFrame(columns=['best_val', 'rangelimit_mode', 'metric'])
+    for (metric, src_file, dest_file) in  list_images:
+        src = os.path.join(src_folder + "/best_results", src_file)
+        dst = os.path.join(src_folder + "/images", dest_file)
+        one_var_data = pd.read_csv(src, sep=';')
+        df = one_var_data.copy()
+        df['metric'] = metric
+        data_all_metrics = pd.concat([data_all_metrics.dropna(axis=1, how='all'), df.dropna(axis=1, how='all')], ignore_index=True)
+        show_one_var_combinatory(dst, one_var_data, "one var - results - " + metric, do_save=False, do_show=False)
+
+    show_one_var_combinatory_all_metrics(src_folder + "/images",
+                                         data_all_metrics, f"{var_name} - results", var_name, do_save=False, do_show=True)
     
-    #from scipy.ndimage import uniform_filter1d
+    quit()
+
 
     # show training results
-    src = r"D:\GitHubProjects\STDL_Classifier\results\trainings_archive\20241128_num_epoch_100_frac_100_deep_binary_no_do"
+    best_epoch = 90
+    src = r"D:\GitHubProjects\STDL_Classifier\results\trainings_archive\20241114_num_epoch_100_frac_100_scratch_best_model_conf_512_scratch"
+    src = r"D:\GitHubProjects\STDL_Classifier\results\trainings_archive\20241116_num_epoch_100_frac_100_scratch_best_model_conf_512_binary"
     src_logs = src + "\logs"
     df_metrics_train = pd.read_csv(os.path.join(src_logs, 'metrics_train.csv'), sep=';')
     df_metrics_val = pd.read_csv(os.path.join(src_logs, 'metrics_val.csv'), sep=';')
@@ -483,35 +474,18 @@ if __name__ == "__main__":
         'val_acc': df_metrics_val.OA,
         'val_loss': df_metrics_val.loss,
     }
-
-    show_log_train(res_logs, os.path.join(src + "/images", 'acc_loss_evolution.png'), False, True)
+    """quit()
+    df_train_data=pd.read_csv(metric_train_src, sep=';')
+    df_val_data=pd.read_csv(metric_val_src, sep=';')
+    dict_acc_loss = {}
+    dict_acc_loss['train_acc'] = df_train_data['OA']
+    dict_acc_loss['train_loss'] = df_train_data['loss']
+    dict_acc_loss['val_acc'] = df_val_data['OA']
+    dict_acc_loss['val_loss'] = df_train_data['loss']"""
+    show_log_train(res_logs, "./logs/MSPP_num_epoch_50_250924/training_curves.png", False, True)
 
     quit()
 
-
-    # show one_var  
-    list_images = [
-        ("F1", "best_F1.csv", "one_var_results_F1.png"),
-        ("F2", "best_F2.csv", "one_var_results_F2.png"),
-        ("F05", "best_F05.csv", "one_var_results_F05.png"),
-        ("OA", "best_OA.csv", "one_var_results_OA.png"),
-        ("Precision", "best_Precision.csv", "one_var_results_Precision.png"),
-        ("Recall", "best_Recall.csv", "one_var_results_Recall.png"),
-    ]
-    data_all_metrics = pd.DataFrame(columns=['best_val', 'rangelimit_mode', 'metric'])
-    for (metric, src_file, dest_file) in  list_images:
-        src = os.path.join("./results/trainings_archive/MULTI_20241110_learning_rate/best_results", src_file)
-        dst = os.path.join("./results/trainings_archive/MULTI_20241110_learning_rate/images", dest_file)
-        one_var_data = pd.read_csv(src, sep=';')
-        df = one_var_data.copy()
-        df['metric'] = metric
-        data_all_metrics = pd.concat([data_all_metrics.dropna(axis=1, how='all'), df.dropna(axis=1, how='all')], ignore_index=True)
-        show_one_var_combinatory(dst, one_var_data, "one var - results - " + metric, do_save=True, do_show=False)
-
-    show_one_var_combinatory_all_metrics("./results/trainings_archive/MULTI_20241110_learning_rate/images",
-                                         data_all_metrics, "learning rates - results", 'learning_rate', do_save=True, do_show=True)
-    
-    quit()
 
 
     # show multi_combination
@@ -574,3 +548,5 @@ if __name__ == "__main__":
     show_precision_recall(data=df_metrics, target_src="./results/trainings/20240930_num_epoch_30_frac_1/images/precision_recall_logs.png",do_show=False, do_save=True)
     
     quit()
+
+    

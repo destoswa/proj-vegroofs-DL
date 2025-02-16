@@ -1,7 +1,0 @@
-bigdata:
-  working_directory: D:/GitHubProjects/STDL_Classifier_new
-  mode: inference # choose between "inference" and "training"
-  batch_size: 1000
-  outputs:
-    results_dir: results/bigdata
-    results_suffixe: test
