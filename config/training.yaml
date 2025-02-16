@@ -1,0 +1,29 @@
+training:
+  working_directory: D:/GitHubProjects/STDL_Classifier_test_2/proj_vegroofs_dl
+  inputs:
+   dataset_root: data/dataset_test
+   pretrained_src: DL/models/model.tar
+  outputs:
+    res_dir: results/trainings/
+    folder_name_suffix: test
+  processes:
+    do_preprocessing: False  # only working with single trainings
+  parameters:
+    norm_boundaries: [[0,255],[0,255],[0,255],[0,255],[-1,1],[0,765]]
+    data_frac: 0.1
+    train_frac: 0.7
+    num_epochs: 2
+    batch_size: 4
+    num_workers: 4
+    learning_rate: 0.0001
+    weight_decay: 0.0001
+    from_pretrained: False
+  
+  training_mode: single # do not change!
+
+  model:
+    model_type: multi # to choose in ["multi", "binary"]
+    backbone_num_levels: 3
+    backbone_num_layers: 1
+    aspp_atrous_rates: [4, 8, 12] 
+    dropout_frac: 0.0

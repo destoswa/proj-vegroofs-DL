@@ -1,0 +1,9 @@
+.venv/
+data/*
+results/*
+!results/*.*
+!results/inferences/*
+runs/*
+outputs/*
+multirun/
+**/__pycache__/*
