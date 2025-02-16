@@ -28,6 +28,7 @@ def inference(cfg:DictConfig):
     INPUTS = INFERENCE['inputs']
     POLYGON_SRC = INPUTS['polygon_src']
     RASTERS_DIR = INPUTS['rasters_dir']
+    CHM_SRC = INPUTS['chm_src']
     CLASS_LABELS_DIR = INPUTS['class_labels_dir']
     MODEL_SRC = INPUTS['model_src']
 
@@ -89,6 +90,7 @@ def inference(cfg:DictConfig):
     cfg_preprocess.preprocessing.working_directory = WORKING_DIRECTORY
     cfg_preprocess.preprocessing.inputs.polygon_src = POLYGON_SRC
     cfg_preprocess.preprocessing.inputs.rasters_dir = RASTERS_DIR
+    cfg_preprocess.preprocessing.inputs.chm_src = CHM_SRC
     cfg_preprocess.preprocessing.inputs.class_labels_dir = CLASS_LABELS_DIR
     cfg_preprocess.preprocessing.outputs.output_dir = DATASET_DIR
     cfg_preprocess.preprocessing.processes.do_drop_overlapping = DO_DROP_OVERLAPPING
@@ -144,6 +146,7 @@ def inference(cfg:DictConfig):
     assert(os.path.exists(MODEL_SRC))
     checkpoint = torch.load(MODEL_SRC, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
 
     # Predictions
     lst_egids = []

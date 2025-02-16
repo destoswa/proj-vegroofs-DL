@@ -3,6 +3,7 @@ inference:
   inputs:
     polygon_src: ./data/inference/infs_concat_roofs_join_green.gpkg
     rasters_dir: ./data/inference/tiles_inference
+    chm_src : data\sources\CHM\CHM_trainingset.gpkg
     class_labels_dir: ./data/sources/class_labels_multi.csv
     model_src: ./models/inference/model.tar
   outputs:

@@ -4,6 +4,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import geopandas as gpd
+import dask_geopandas as dg
 from tqdm import tqdm
 from loguru import logger
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -52,6 +53,7 @@ def preprocess(cfg: DictConfig):
     INPUTS = cfg['inputs']
     POLYGON_SRC = INPUTS['polygon_src']
     RASTER_DIR = INPUTS['rasters_dir']
+    CHM_SRC = INPUTS['chm_src']
     CLASS_LABELS_DIR = INPUTS['class_labels_dir']
 
     OUTPUTS = cfg['outputs']
@@ -168,8 +170,19 @@ def preprocess(cfg: DictConfig):
     if BATCH_SIZE == 0:
         BATCH_SIZE = len(roofs)
     for batch_idx, sub_roofs in enumerate(chunks(roofs, BATCH_SIZE)):
-        print(
-            f"Processing batch {batch_idx} / {int(np.ceil(len(roofs) / BATCH_SIZE - 1))}")
+        if BATCH_SIZE < len(roofs):
+            print(f"Processing batch {batch_idx} / {int(np.ceil(len(roofs) / BATCH_SIZE - 1))}")
+            
+        # Overlay on CHM
+        print("Overlaying with CHM")
+        CHM_GPD = dg.read_file(CHM_SRC, chunksize=100000)
+        delayed_partitions = CHM_GPD.to_delayed()
+        for _, delayed_partition in tqdm(enumerate(delayed_partitions), total=len(delayed_partitions), desc="Overlaying"):
+            # Compute the partition (convert to a GeoDataFrame)
+            partition_gdf = delayed_partition.compute()
+            # Perform operation on the partition
+            sub_roofs = gpd.overlay(sub_roofs, partition_gdf, how='difference', keep_geom_type=True)
+
         # Create samples by clipping the polygons to the rasters
         samples, sub_overlapping_roofs, sub_nonmatching_roofs = clip_roofs_to_raster(
             raster_src_list, sub_roofs, MAX_WORKERS)

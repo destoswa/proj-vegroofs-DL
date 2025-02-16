@@ -3,6 +3,7 @@ preprocessing:
   inputs:
     polygon_src: data/sources/gt_matching_roofs.gpkg
     rasters_dir: data/sources/scratch_dataset
+    chm_src : data\sources\CHM\CHM_trainingset.gpkg
     class_labels_dir: data/sources/class_labels_multi.csv
   outputs:
     output_dir: data/dataset_test
