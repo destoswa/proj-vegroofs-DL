@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
@@ -22,7 +23,7 @@ class Backbone_conv(nn.Module):
         lst_convs = []
         in_channels = input_channels
         out_channels = 64//2**(num_levels-1)
-        for _ in range(num_levels): # creates the levels
+        for i in range(num_levels): # creates the levels
             lst_convs.append(nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False))
             lst_convs.append(nn.BatchNorm2d(out_channels))
             lst_convs.append(nn.LeakyReLU())
@@ -65,6 +66,7 @@ class ResFC(nn.Module):
         self.conv13 = nn.Conv2d(input_channels, output_channels, kernel_size=1, bias=False)
         self.bn13 = nn.BatchNorm2d(output_channels)
         self.gap = nn.AvgPool2d(int(img_size))
+        #self.gap = nn.AvgPool2d(64)
 
         # Fully connected layer
         self.linear1 = nn.Linear(256, 128, bias=False)
@@ -173,3 +175,90 @@ class ASPP(nn.Module):
         res = torch.cat(res, dim=1)
         return self.project(res)
     
+
+class ResFC_gs(nn.Module):
+    """
+    ResFC: A residual fully connected network with global average pooling and dropout layers.
+
+    Arguments:
+    - input_channels (int): Number of input channels for the convolution.
+    - output_channels (int): Number of output channels after the fully connected layers.
+    - img_size (int): Input image size.
+
+    Returns:
+    - torch.Tensor: Output tensor after fully connected layers, residual connection included.
+    """
+    def __init__(self, input_channels, img_size, dropout_frac):
+        super(ResFC_gs, self).__init__()
+        self.relu = nn.LeakyReLU()
+        self.do = nn.Dropout(dropout_frac)
+        self.bn = nn.BatchNorm1d(32)
+
+        # global averaging
+        self.conv13 = nn.Conv2d(input_channels, 32, kernel_size=1, bias=False)
+        self.bn13 = nn.BatchNorm2d(32)
+        self.gap = nn.AvgPool2d(int(img_size))
+        #self.gap = nn.AvgPool2d(64)
+
+        # Fully connected layer
+        self.linear1 = nn.Linear(256, 128, bias=False)
+        self.linear2 = nn.Linear(128, 64, bias=False)
+        self.linear3 = nn.Linear(64, 32, bias=False)
+        #self.linear4 = nn.Linear(32, output_channels, bias=False)
+
+    def forward(self, x):
+        batch_size = x.size()[0]
+        y = x
+        y = self.gap(y)  # B x 256 x 1 x 1
+        y = y.reshape((batch_size, 256))  # B x 256
+        y = self.relu(self.do(self.linear1(y)))  # B x 128
+        y = self.relu(self.do(self.linear2(y)))  # B x 64
+        y = self.relu(self.do(self.linear3(y)))  # B x 32
+        #y = self.relu(self.do(self.linear4(y)))  # B x O
+        x = self.relu(self.bn13(self.conv13(x)))  # B x 32 x N/8 x N/8
+        x = self.gap(x)  # B x 32 x 1 x 1 x 1
+        x = x.reshape((batch_size, 32))  # B x 32
+        z = self.relu(self.bn(x + y))
+        return z
+
+
+class MLP_GlobStats(nn.Module):
+    def __init__(self, input_channels):
+        super(MLP_GlobStats, self).__init__()
+        self.do = nn.Dropout(0.0)
+        self.relu = nn.LeakyReLU()
+        self.bn = nn.BatchNorm1d(32)
+        self.linear1 = nn.Linear(input_channels, 128, bias=False)
+        #self.linear2 = nn.Linear(256, 128, bias=False)
+        self.linear3 = nn.Linear(128, 64, bias=False)
+        self.linear4 = nn.Linear(64, 32, bias=False)
+        self.residual = nn.Linear(input_channels,32, bias=False)
+
+    def forward(self, x):
+        y = self.residual(x)
+        x = self.relu(self.do(self.linear1(x)))
+        #x = self.relu(self.do(self.linear2(x)))
+        x = self.relu(self.do(self.linear3(x)))
+        x = self.relu(self.bn(self.do(self.linear4(x))))
+        return self.bn(x + y)
+    
+
+class MLP_Merge(nn.Module):
+    def __init__(self, input_channels, output_channels):
+        super(MLP_Merge, self).__init__()
+        self.do = nn.Dropout(0.0)
+        self.relu = nn.LeakyReLU()
+        self.linear1 = nn.Linear(2 * input_channels, 128, bias=False)
+        self.linear2 = nn.Linear(128, 64, bias=False)
+        self.linear3 = nn.Linear(64, 32, bias=False)
+        self.linear4 = nn.Linear(32, output_channels, bias=False)
+        self.residual = nn.Linear(2 * input_channels, output_channels, bias=False)
+
+    def forward(self, x, y):
+        z = torch.cat((x,y), dim=1)
+        z_res = self.residual(z)
+        z = self.relu(self.do(self.linear1(z)))
+        z = self.relu(self.do(self.linear2(z)))
+        z = self.relu(self.do(self.linear3(z)))
+        z = self.relu(self.do(self.linear4(z)))
+        return z + z_res

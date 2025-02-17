@@ -6,4 +6,3 @@ results/*
 runs/*
 outputs/*
 multirun/
-**/__pycache__/*

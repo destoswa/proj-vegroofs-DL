@@ -10,9 +10,7 @@ import matplotlib.pyplot as plt
 import rasterio
 from rasterio.mask import mask
 from skimage.transform import resize
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from multiprocessing import Manager
-from functools import partial
+import concurrent.futures
 
 
 def ndvi_samp_gen(arr_input):
@@ -66,43 +64,50 @@ def ndvi_val_to_8bits(ndvi):
     return ((ndvi + 1)/2 * 256).astype(int)
 
 
-def rotate_sample(sample_id, list_samples, num_per_cat, df_dataset, df_categories, shared_dict, do_save_tif):
-    r, file = list_samples[sample_id]
-    egid = file.split('.')[0]
-    original_egid = egid.split('_')[0]
-    samp_code_num = df_dataset.loc[df_dataset.EGID == float(egid)]['label'].values[0]
+def ndvi_to_mask(ndvi, threshold=0.0):
+    """
+    Create a binary mask from NDVI values based on a threshold.
 
-    # find corresponding number of rotations
-    class_max_rep = np.max(list(num_per_cat.values()))
-    num_cat = num_per_cat[samp_code_num]
-    num_rot = np.clip(int(class_max_rep/num_cat), 0, 4) - 1
+    Args:
+        - ndvi (numpy.ndarray): NDVI array with shape (1, height, width).
+        - threshold (float, optional): Threshold value to create the mask. Default is 0.0.
 
-    # if under-represented sample
-    if num_rot > 0:
-        with open(r + "/" + file, 'rb') as input_file:
-            image_arr = pickle.load(input_file)
-        
-        # create and save rotated samples
-        for i in range(num_rot):
-            image_arr_rot = np.rot90(image_arr, k=i+1, axes=(1,2))
-            file_rot_name = egid + "_" + str(int((i+1)*90))
-
-            # save rotated copy
-            if do_save_tif:
-                raster = rasterio.open(r + "/" + egid + ".tif")
-                with rasterio.open(r + "/" + file_rot_name + ".tif", "w", **raster.meta) as dst:
-                    dst.write(image_arr_rot[1:4, ...])
-            with open(r + "/" + file_rot_name + ".pickle", 'wb') as output_file:
-                pickle.dump(image_arr_rot, output_file)
-
-            # add rotated samples in csv list
-            samp_cat = df_categories.loc[df_categories.code_num == samp_code_num, 'cat'].values[0]
-            samp_code_char = df_categories.loc[df_categories.code_num == samp_code_num, 'code_char'].values[0]
-            # df_dataset.loc[len(df_dataset.index)] = [file_rot_name, samp_code_char, samp_cat + "/" + file_rot_name + ".pickle", samp_code_num, original_egid]
-            shared_dict[len(df_dataset) + sample_id * 3 + i] = [file_rot_name, samp_code_char, samp_cat + "/" + file_rot_name + ".pickle", samp_code_num, original_egid]
+    Returns:
+        - numpy.ndarray: Boolean mask indicating where NDVI is below the threshold.
+    """
+    return (ndvi < threshold)
 
 
-def da_rotation(dataset_dir, df_categories, max_workers, do_save_tif):
+def mask_nbh_rounding(mask, nbh=1, add=0):
+    """
+    Round neighborhood mask based on the count of neighboring positive values.
+
+    Args:
+        - mask (numpy.ndarray): Boolean mask with shape (height, width).
+        - nbh (int, optional): Neighborhood size. Must be >= 1. Default is 1.
+        - add (int, optional): Additional count to adjust the threshold. Default is 0.
+
+    Returns:
+        - numpy.ndarray: Boolean mask after neighborhood rounding.
+    """
+    assert(nbh>=1)
+    assert(len(mask.shape) == 2)
+    mask = mask.astype(int)
+    new_mask = np.copy(mask)
+    width = mask.shape[1]
+    height = mask.shape[0]
+    for i in range(height):
+        for j in range(width):
+            if mask[i,j] == 1:
+                count = np.sum(mask[np.clip(i-nbh,a_min=0, a_max=None):np.clip(i+nbh + 1,a_max=height, a_min=None),
+                                    np.clip(j-nbh,a_min=0, a_max=None):np.clip(j+nbh + 1, a_max=width, a_min=None),
+                                    ])
+                if count <= 2**(nbh+1) + add:
+                    new_mask[i,j] = 0
+    return new_mask.astype(bool)
+
+
+def da_rotation(dataset_dir, df_categories):
     """
     Perform data augmentation by rotating images and saving the rotated samples.
 
@@ -115,160 +120,179 @@ def da_rotation(dataset_dir, df_categories, max_workers, do_save_tif):
     """
     dataset_list_src = os.path.join(dataset_dir, "dataset.csv")
     assert os.path.exists(dataset_list_src)
+    assert os.path.exists(dataset_dir)
 
-    df_dataset = pd.read_csv(dataset_list_src, sep=";")
-    df_dataset.dropna(inplace=True)
-    if pd.api.types.is_numeric_dtype(df_dataset.EGID):
-        df_dataset.EGID = df_dataset.EGID.astype(int)
+    dataset_list = pd.read_csv(dataset_list_src, sep=";")
+    dataset_list.dropna(inplace=True)
+    if pd.api.types.is_numeric_dtype(dataset_list.EGID):
+        dataset_list.EGID = dataset_list.EGID.astype(int)
 
-    # Get all samples
+    # get all samples
     list_samples = []
     for r, d, f in os.walk(dataset_dir):
         for file in f:
-            if file.endswith('.pickle'):
+            if file.endswith('.pickle') and not file.endswith('global_stats.pickle'):
                 list_samples.append([r,file])
 
-    num_per_cat = df_dataset[['label','EGID']].groupby('label').count().to_dict()['EGID']
+    num_per_cat = dataset_list[['label','EGID']].groupby('label').count().to_dict()['EGID']
 
-    with Manager() as manager:
-        shared_dict = manager.dict()
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            part_func = partial(rotate_sample,
-                                list_samples=list_samples,
-                                num_per_cat=num_per_cat,
-                                df_dataset=df_dataset,
-                                df_categories=df_categories,
-                                shared_dict=shared_dict,
-                                do_save_tif=do_save_tif,
-                                )
+    # go through each sample
+    for _, (r,file) in tqdm(enumerate(list_samples), total=len(list_samples), desc="Rotating"):
+        egid = file.split('.')[0]
+        original_egid = egid.split('_')[0]
+        samp_code_num = dataset_list.loc[dataset_list.EGID == int(egid)]['label'].values[0]
+        # get raster
+        raster = rasterio.open(r + "/" + egid + ".tif")
+
+        # find corresponding number of rotations
+        class_max_rep = np.max(list(num_per_cat.values()))
+        num_cat = num_per_cat[samp_code_num]
+        num_rot = np.clip(int(class_max_rep/num_cat), 0, 4) - 1
+
+        # if under-represented sample
+        if num_rot > 0:
+            with open(r + "/" + file, 'rb') as input_file:
+                image_arr = pickle.load(input_file)
             
-            futures = {executor.submit(part_func, id_samp) for id_samp in range(len(list_samples))}
+            # create and save rotated samples
+            for i in range(num_rot):
+                image_arr_rot = np.rot90(image_arr, k=i+1, axes=(1,2))
+                file_rot_name = egid + "_" + str(int((i+1)*90))
 
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Rotating"):
-                future.result()
+                # save rotated copy
+                with rasterio.open(r + "/" + file_rot_name + ".tif", "w", **raster.meta) as dst:
+                    dst.write(image_arr_rot)
+                with open(r + "/" + file_rot_name + ".pickle", 'wb') as output_file:
+                    pickle.dump(image_arr_rot, output_file)
 
+                # add rotated samples in csv list
+                samp_cat = df_categories.loc[df_categories.code_num == samp_code_num, 'cat'].values[0]
+                samp_code_char = df_categories.loc[df_categories.code_num == samp_code_num, 'code_char'].values[0]
+                dataset_list.loc[len(dataset_list.index)] = [file_rot_name, samp_code_char, samp_cat + "/" + file_rot_name + ".pickle", samp_code_num, original_egid]
 
-        # add new samples to dataset DataFrame
-        df_dataset = pd.concat([df_dataset, pd.DataFrame.from_dict(shared_dict, orient='index', columns = df_dataset.columns)])
-
-    # Save csv list
-    df_dataset.to_csv(dataset_dir + "/" + "dataset.csv", sep=';', index=False)
-
-
-def flip_sample(sample_id, list_samples, num_per_cat, df_dataset, df_categories, shared_dict, do_save_tif):
-    r, file = list_samples[sample_id]
-    egid = file.split('.')[0]
-    original_egid = egid.split('_')[0]
-    samp_code_num = df_dataset.loc[df_dataset.EGID.astype('string') == str(egid)]['label'].values[0]
-
-    # find corresponding number of flipping
-    class_max_rep = np.max(list(num_per_cat.values()))
-    num_cat = num_per_cat[samp_code_num]
-    num_flip = np.clip(int(class_max_rep/num_cat), 0, 2)
-    
-    # if under-represented sample
-    if num_flip > 0:
-        with open(r + "/" + file, 'rb') as input_file:
-            image_arr = pickle.load(input_file)
-        
-        # create and save rotated samples
-        suffixes = ['hor', 'vert']
-        for i in range(num_flip):
-            image_arr_flip = np.flip(image_arr, axis=(i+1))
-            file_flip_name = egid + "_flip_" + suffixes[i]
-
-            # save rotated copy
-            if do_save_tif:
-                raster = rasterio.open(r + "/" + egid + ".tif")
-                with rasterio.open(r + "/" + file_flip_name + ".tif", "w", **raster.meta) as dst:
-                    dst.write(image_arr_flip[1:4, ...])
-            with open(r + "/" + file_flip_name + ".pickle", 'wb') as output_file:
-                pickle.dump(image_arr_flip, output_file)
-
-            # add rotated samples in csv list
-            samp_cat = df_categories.loc[df_categories.code_num == samp_code_num, 'cat'].values[0]
-            samp_code_char = df_categories.loc[df_categories.code_num == samp_code_num, 'code_char'].values[0]
-
-            # df_dataset.loc[len(df_dataset.index)] = [file_rot_name, samp_code_char, samp_cat + "/" + file_rot_name + ".pickle", samp_code_num, original_egid]
-            shared_dict[len(df_dataset) + sample_id * 2 + i] = [file_flip_name, samp_code_char, samp_cat + "/" + file_flip_name + ".pickle", samp_code_num, original_egid]
+    # save csv list
+    dataset_list.to_csv(dataset_dir + "/" + "dataset.csv", sep=';', index=False)
 
 
-def da_flipping(dataset_dir, df_categories, max_workers, do_save_tif):
-    """
-    Perform data augmentation by flipping images and saving the rotated samples.
-
-    Args:
-        - dataset_dir (str): Directory containing the dataset and CSV files.
-        - df_categories (dict): Mapping of category names to labels.
-
-    Returns:
-        - None
-    """
+def da_flipping(dataset_dir, df_categories):
     dataset_list_src = os.path.join(dataset_dir, "dataset.csv")
     assert os.path.exists(dataset_list_src)
+    assert os.path.exists(dataset_dir)
 
-    df_dataset = pd.read_csv(dataset_list_src, sep=";")
-    df_dataset.dropna(inplace=True)
-    if pd.api.types.is_numeric_dtype(df_dataset.EGID):
-        df_dataset.EGID = df_dataset.EGID.astype(int)
+    dataset_list = pd.read_csv(dataset_list_src, sep=";")
+    dataset_list.dropna(inplace=True)
+    if pd.api.types.is_numeric_dtype(dataset_list.EGID):
+        dataset_list.EGID = dataset_list.EGID.astype(int)
 
-    # Get all samples
+    # get all samples
     list_samples = []
     for r, d, f in os.walk(dataset_dir):
         for file in f:
-            if file.endswith('.pickle'):
+            if file.endswith('.pickle') and not file.endswith('global_stats.pickle'):
                 list_samples.append([r,file])
 
-    num_per_cat = df_dataset[['label','EGID']].groupby('label').count().to_dict()['EGID']
+    num_per_cat = dataset_list[['label','EGID']].groupby('label').count().to_dict()['EGID']
 
-    with Manager() as manager:
-        shared_dict = manager.dict()
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            part_func = partial(flip_sample,
-                                list_samples=list_samples,
-                                num_per_cat=num_per_cat,
-                                df_dataset=df_dataset,
-                                df_categories=df_categories,
-                                shared_dict=shared_dict,
-                                do_save_tif=do_save_tif,
-                                )
+    # go through each sample
+    for _, (r,file) in tqdm(enumerate(list_samples), total=len(list_samples), desc="Flipping"):
+        egid = file.split('.')[0]
+        original_egid = egid.split('_')[0]
+        samp_code_num = dataset_list.loc[dataset_list.EGID.astype('string') == str(egid)]['label'].values[0]
+
+        # get raster
+        raster = rasterio.open(r + "/" + egid + ".tif")
+
+        # find corresponding number of flipping
+        class_max_rep = np.max(list(num_per_cat.values()))
+        num_cat = num_per_cat[samp_code_num]
+        num_flip = np.clip(int(class_max_rep/num_cat), 0, 2)
+        
+        # if under-represented sample
+        if num_flip > 0:
+            with open(r + "/" + file, 'rb') as input_file:
+                image_arr = pickle.load(input_file)
             
-            futures = {executor.submit(part_func, id_samp) for id_samp in range(len(list_samples))}
+            # create and save rotated samples
+            suffixes = ['hor', 'vert']
+            for i in range(num_flip):
+                image_arr_flip = np.flip(image_arr, axis= (i+1))
+                file_flip_name = egid + "_flip_" + suffixes[i]
 
-            for future in tqdm(as_completed(futures), total=len(futures), desc="Flipping"):
-                future.result()
+                # save rotated copy
+                with rasterio.open(r + "/" + file_flip_name + ".tif", "w", **raster.meta) as dst:
+                    dst.write(image_arr_flip)
+                with open(r + "/" + file_flip_name + ".pickle", 'wb') as output_file:
+                    pickle.dump(image_arr_flip, output_file)
 
-        # add new samples to dataset DataFrame
-        df_dataset = pd.concat([df_dataset, pd.DataFrame.from_dict(shared_dict, orient='index', columns=df_dataset.columns)])
+                # add rotated samples in csv list
+                samp_cat = df_categories.loc[df_categories.code_num == samp_code_num, 'cat'].values[0]
+                samp_code_char = df_categories.loc[df_categories.code_num == samp_code_num, 'code_char'].values[0]
+                dataset_list.loc[len(dataset_list.index)] = [file_flip_name, samp_code_char, samp_cat + "/" + file_flip_name + ".pickle", samp_code_num, original_egid]
 
-    # Save csv list
-    df_dataset.to_csv(dataset_dir + "/" + "dataset.csv", sep=';', index=False)
+    # save csv list
+    dataset_list.to_csv(dataset_dir + "/" + "dataset.csv", sep=';', index=False)
+
+
+def range_limiting(sample, threshold, method='norm'):
+    """
+    Limit the range of a sample based on the specified method.
+
+    Args:
+        - sample (numpy.ndarray): Input array of any size.
+        - threshold (int): Threshold value for limiting the range.
+        - method (str, optional): Method for limiting range. 
+                                Can be one of {'clip', 'norm', 'log_norm', 'self_max_norm'}. 
+                                Default is 'norm'.
+
+    Returns:
+        - numpy.ndarray: Output array of the same size as the input sample, with limited range.
+    """
+    assert(method in ['none', 'clip','norm', 'log_norm', 'self_max_norm'])
+    assert(isinstance(threshold, int))
+    assert(threshold > 0)
+    assert(isinstance(sample, np.ndarray))
+
+    # methods
+    def clip(sample, threshold):
+        return np.clip(sample,a_min=0,a_max=threshold)
+    
+    def norm(sample, threshold):
+        return sample / (2**16 - 1) * threshold
+    
+    def log_norm(sample, threshold):
+        val_log_max = np.log(2**16 - 1)
+        sample[sample != 0] = np.log(sample[sample != 0]) / val_log_max * threshold
+        return sample
+
+    def self_max_norm(sample, threshold):
+        sample[sample != 0] = sample[sample != 0] / np.max(sample) * threshold
+        return sample
+    
+    if method == 'none':
+        return sample
+    elif method == 'clip':
+        return clip(sample, threshold)
+    elif method == 'norm':
+        return norm(sample, threshold)
+    elif method == 'log_norm':
+        return log_norm(sample, threshold)
+    elif method == 'self_max_norm':
+        return self_max_norm(sample, threshold)
+    
+ # add comment for next functions...
+ #    
 
 
 def normalize_sample_size(sample, sample_size, method='stretching'):
-    """
-    Adjusts the size of a sample to a specified `sample_size` using either "stretching" or "padding" mode.
-    Ensures the resulting sample has even dimensions.
-
-    Args:
-        - sample (np.ndarray): Input sample with shape `(bands, height, width)`.
-        - sample_size (int): Desired size for the output sample.
-        - method (str, optional): Method for resizing, either 'stretching' (resizes directly to the target size) 
-                                or 'padding' (resizes and centers with black padding). Defaults to 'stretching'.
-
-    Returns:
-        - np.ndarray: The resized or padded sample with shape `(bands, sample_size, sample_size)`.
-    """
-    # Security
+    # security
     assert method in ['stretching', 'padding']
 
-    # Stretching mode
+    # if stretch no matter the sample's size
     if method == 'stretching':
         sample = resize(sample, [sample.shape[0], sample_size, sample_size], anti_aliasing=False)
         return sample
     
-    # Padding mode
-    #   _get original dimensions
+    # get original dimensions
     dimensions = sample.shape[1:3]
     max_side = np.argmax(dimensions)
     min_side = np.argmin(dimensions)
@@ -276,7 +300,7 @@ def normalize_sample_size(sample, sample_size, method='stretching'):
     min_side_size = dimensions[min_side]
     ratio = min_side_size / max_side_size
 
-    #   _if max side is bigger than sample_size, resize
+    # if max side is bigger than sample_size, resize
     if max_side_size >= sample_size:
         new_min_size = int(sample_size * ratio)
         new_min_size -= new_min_size % 2 # make sure that the size is even
@@ -290,11 +314,11 @@ def normalize_sample_size(sample, sample_size, method='stretching'):
         if tuple(new_size) != sample.shape:
             sample = resize(sample, new_size, anti_aliasing=False)
 
-    #   _verification that both sides are even:
+    # verification that both sides are even:
     assert sample.shape[1]%2 == 0
     assert sample.shape[2]%2 == 0
 
-    #   _center and add black padding
+    # center and add black padding
     new_sample = np.zeros((sample.shape[0], sample_size, sample_size))
     padding_x = int((sample_size - sample.shape[1])/2)
     padding_y = int((sample_size - sample.shape[2])/2)
@@ -303,18 +327,19 @@ def normalize_sample_size(sample, sample_size, method='stretching'):
     return new_sample
 
 
+def compute_global_stats(sample):
+    features = []
+    for band in range(sample.shape[0]):
+        features.append(np.mean(sample[band,...]))
+        features.append(np.std(sample[band,...]))
+        features.append(np.median(sample[band,...]))
+        features.append(np.min(sample[band,...]))
+        features.append(np.max(sample[band,...]))
+    return features
+
+
+
 def get_sample(src_path: str, roof: tuple):
-    """
-    Extracts a raster sample from a source file for a specific roof geometry. 
-
-    Args:
-        - src_path (str): Path to the raster source file.
-        - roof (tuple): A GeoDataFrame's Row containing informations about a roof.
-
-    Returns:
-        - tuple or None: If successful, returns a tuple `(egid, out_image, out_transform, raster_src, cat)`.
-                       Returns `None` if the geometry cannot be cropped from the source raster.
-    """
     egid = roof[0]
     geom = roof[1]
     raster_src = roof[2]
@@ -335,11 +360,11 @@ def clip_roofs_to_raster(lst_rasters_src:list, df_roofs:list, max_workers:int)->
     Clips a set of roofs to the matching raster images and selects the largest image for each roof.
 
     Args:
-        - lst_rasters_src (list): List of file paths to raster images.
-        - df_roofs (DataFrame): DataFrame containing roof geometries with at least two columns: 'EGID' (unique ID) and 'geometry'.
+    - lst_rasters_src (list): List of file paths to raster images.
+    - df_roofs (DataFrame): DataFrame containing roof geometries with at least two columns: 'EGID' (unique ID) and 'geometry'.
 
     Returns:
-        - samples (list): A dictionary with egid as keys and a tuple containing the selected raster image (as an array), and the raster's transform as values.
+    - samples (list): A dictionary with egid as keys and a tuple containing the selected raster image (as an array), and the raster's transform as values.
     """
     
     # Identify roofs that overlap with each raster and add matching roofs for each raster
@@ -360,10 +385,10 @@ def clip_roofs_to_raster(lst_rasters_src:list, df_roofs:list, max_workers:int)->
     dict_matching_rasters = {int(egid): [] for egid in df_roofs.EGID.values}
 
     # Retrieve image samples asynchronously for each raster and add to dictionary
-    for id_r, raster_src in tqdm(enumerate(lst_rasters_src), total=len(lst_rasters_src), desc="  Clipping: "):
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+    for id_r, raster_src in tqdm(enumerate(lst_rasters_src), total=len(lst_rasters_src), desc="Clipping: "):
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(get_sample, raster_src, roof) for roof in lst_matching_roofs[id_r]}
-            for future in as_completed(futures):
+            for future in concurrent.futures.as_completed(futures):
                 try:
                     res = future.result()
                     dict_matching_rasters[res[0]].append(res[1::])
@@ -399,85 +424,100 @@ def clip_roofs_to_raster(lst_rasters_src:list, df_roofs:list, max_workers:int)->
     return samples, overlapping_roofs, nonmatching_roofs
 
 
-def processes_on_sample(egid, sample, cfg, cat_dir, shared_dict, df_categories, overlapping_roofs):
-    out_image = sample[0]
-    out_transform = sample[1]
-    raster_src = sample[2]
-    cat = sample[3]
+# small util for testing reset
+def test_reset(dataset_dir):
+    for r, d, f in os.walk(dataset_dir):
+        for file in f:
+            file_name_split = file.split('_')
 
-    # Load processes flags
-    PROCESSES = cfg['processes']
-    IMAGE_NORM_STYLE = PROCESSES['image_norm_style']
-    DO_DROP_OVERLAPPING = PROCESSES['do_drop_overlapping']
-    DO_DROP_BASED_ON_NDVI = PROCESSES['do_drop_based_on_ndvi']
-    DO_PRODUCE_TIF = PROCESSES['do_produce_tif']
+            if len(file_name_split) > 1 and not file.endswith('.csv'):
+                os.remove(r + "/" + file)
+                
 
-    # Load metadata
-    METADATA = cfg['metadata']
-    PREPROCESS_MODE = METADATA['preprocess_mode']
-    SAMPLE_SIZE = METADATA['sample_size']
+if __name__ == '__main__':
+    # test
 
-    # create dictionary when value is aborted
-    dict_aborted = {
-        "toosmall_sample": "",
-        "overhanging_tree": "",
-    }
-    # dropping overlapping roofs
-    if DO_DROP_OVERLAPPING and egid in overlapping_roofs and sample_format != 'uint16':
-        return None
+    src_raster = "./data/sources/scratch_dataset"
+    src_roofs = "./data/sources/gt_tot.gpkg"
 
-    num_layers = out_image.shape[0]
-    sample_format = out_image.dtype
-    egid = str(egid)
-    raster = rasterio.open(raster_src)
+    roofs = gpd.read_file(src_roofs).to_crs(2056)
 
-    # compute NDVI
-    ndvi_canal = ndvi_samp_gen(out_image)
-    out_image = np.concatenate([out_image, ndvi_canal])
-    num_layers = num_layers + 1
+    lst_rasters_src = []
+    raster_list = []
+    for r, d, f in os.walk(src_raster):
+        for file in f:
+            if file.endswith('.tif'):
+                file_src = r + '/' + file
+                file_src = file_src.replace('\\','/')
+                lst_rasters_src.append(file_src)
+                raster_list.append(rasterio.open(file_src))
 
-    # compute luminosity
-    lum_canal = lum_samp_gen(out_image)
-    out_image = np.concatenate([out_image, lum_canal])
-    num_layers = num_layers + 1
+    #samples = clip_roofs_to_raster(lst_rasters_src, roofs.sample(frac=0.05))
+    egid_very_small = 295077114
+    egid_small = 1029750
+    egid_big = 1012243
+    egid_very_big = 11524802
+
+    list_arr_imgs = []
+    norm_boundaries = [[0,255],[0,255],[0,255],[0,255],[-1,1],[0,765]]
+    for egid, title in zip([egid_very_small, egid_small, egid_big, egid_very_big], ['Very small', 'Small', 'Big', 'Very big']):
+
+        roof = roofs.loc[roofs.EGID.astype(int) == egid]
+        geom = roof.geometry.values[0]
+
+        out_image = np.empty((0,0))
+        for raster in raster_list:
+            # catch the error when polygon doesn't match raster and just continue to next raster
+            try:
+                out_image, out_transform = mask(raster, [geom], crop=True)
+                sample_formats = out_image.dtype
+            except ValueError:
+                continue
+        print(title)
+        ndvi_canal = ndvi_samp_gen(out_image)
+        out_image = np.concatenate([out_image, ndvi_canal])
+        print(f"\tshape : {out_image.shape}")
+        print(f"\tarea : {roof.area.values[0]}")
+        print(f"\tmin value: {np.min(out_image[4,...])}")
+        print(f"\tmax value: {np.max(out_image[4,...])}")
+        out_image_padd = normalize_sample_size(out_image, 512, method='padding')
+        out_image_stretch = normalize_sample_size(out_image, 512, method='stretching')
+        list_arr_imgs.append((out_image_stretch, out_image_padd))
+        print(f"\tnew shape: {out_image_padd.shape}")
+        print(f"\tnew min value: {np.min(out_image_padd[4,...])}")
+        print(f"\tnew max value: {np.max(out_image_padd[4,...])}")
+        print("---")
+
+    fig, axs = plt.subplots(4,2, figsize=(5,15), sharex=True, sharey=True)
+    for i in range(4):
+        axs[i, 0].imshow(np.moveaxis(list_arr_imgs[i][0][1:4, ...].astype('uint8'), 0,2))
+        axs[i, 1].imshow(np.moveaxis(list_arr_imgs[i][1][1:4, ...].astype('uint8'), 0,2))
+    axs[0, 0].set_title('stretched')
+    axs[0, 1].set_title('padded')
+    plt.show()
+    plt.close()
     
-    # dropping out bare samples based on ndvi value
-    if DO_DROP_BASED_ON_NDVI and cat == 'b' and np.nanmean(ndvi_canal) > 0.05:
-        dict_aborted['overhanging_tree'] = str(egid)
-        return dict_aborted
+    quit()
+
+
+    dataset_dir = './data/dataset'
+    df_categories = pd.read_csv('./data/sources/class_labels_multi.csv', sep=';')
+    da_flipping(dataset_dir, df_categories)
+    quit()
+
+    df_categories = pd.read_csv("./data/dataset_test/class_names.csv", sep=';') 
+    print(df_categories)
+    da_flipping("./data/dataset_test", df_categories)
+    quit()
+    img_arr = np.array([
+        [1,2,3],
+        [4,5,6],
+    ])
+    img_arr = np.arange(1,10).reshape((3,3))
+    print(img_arr)
+    print(np.flip(img_arr, axis=0))
+    print(np.flip(img_arr, axis=1))
+
+    quit()
+
     
-    # normalize sample
-    out_image = normalize_sample_size(out_image, SAMPLE_SIZE, IMAGE_NORM_STYLE)
-
-    # place sample to corresponding folder
-    if PREPROCESS_MODE == 'training':
-        if cat in cat_dir.keys():
-            target_tif_src = cat_dir[cat] + '/' + egid + '.tif'
-            target_pkl_src = cat_dir[cat] + '/' + egid + '.pickle'
-            shared_dict[float(egid)] = df_categories.loc[df_categories.code_char == cat, 'cat'].values[0] + '/' + egid + '.pickle'
-        else:
-            raise ValueError(f"no category with letter '{cat}' !")
-    else:
-        target_tif_src = os.path.join(cat_dir['data'], egid + '.tif')
-        target_pkl_src = os.path.join(cat_dir['data'], egid + '.pickle')
-        shared_dict[float(egid)] = f'data/{egid}.pickle'
-    
-    # create tif file for visualization
-    if DO_PRODUCE_TIF:
-        out_meta = raster.meta.copy()
-        out_meta.update({
-            "driver": "GTiff",
-            "width": out_image.shape[2],
-            "height": out_image.shape[1],
-            "count": 3,
-            "transform": out_transform,
-            "crs": rasterio.CRS.from_epsg(2056),
-        })
-        with rasterio.open(target_tif_src, "w", **out_meta) as dst:
-            dst.write(out_image[1:4, ...])
-
-    # create pickle file to keep the numpy array (without rasterio 8-bit transformation)
-    with open(target_pkl_src, 'wb') as dst:
-        pickle.dump(out_image, dst)
-
-    return None

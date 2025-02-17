@@ -1,8 +1,9 @@
 import hydra
 from omegaconf import DictConfig, OmegaConf
-from preprocessing import preprocess
+from preprocessing_multiproc import preprocess
 from training import train
 import logging
+from hydra.core.hydra_config import HydraConfig
 
 log = logging.getLogger(__name__)
 
