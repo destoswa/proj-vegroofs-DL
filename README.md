@@ -2,9 +2,7 @@
 
 ## Installation
 ### downolading data
-A toy example of dataset is available following [this link](...)
-
-The location `./data/sources/` has been set to receive them.
+A toy example of dataset is available. In order to load it, run the script `load_example_data.py` which is going to download the rasters and the AOI in the location `./data/sources/example`
 
 ### python version
 This project was developped with **python3.9** version. In order to lower the risk of incompatibilities, we suggest to use the same version.
