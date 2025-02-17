@@ -1,3 +1,0 @@
-preprocessing:
-  do_rotation: True
-  sample_size: 1024

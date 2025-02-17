@@ -1,29 +1,24 @@
 preprocessing:
-  working_directory: STDL_Classifier
+  working_directory: D:/GitHubProjects/STDL_Classifier_test_2/proj_vegroofs_dl
   inputs:
     polygon_src: data/sources/gt_matching_roofs.gpkg
     rasters_dir: data/sources/scratch_dataset
     chm_src : data\sources\CHM\CHM_trainingset.gpkg
     class_labels_dir: data/sources/class_labels_multi.csv
   outputs:
-    output_dir: data/dataset_global_stats
+    output_dir: data/dataset_test
   processes:
     image_norm_style: stretching  # one of {'stretching', 'padding'}
-    do_rangelimit: False
-    do_mask: False
-    do_smooth_mask: False
     do_da_rotation: True
-    do_da_flipping: False
+    do_da_flipping: True
     do_drop_overlapping: False
     do_drop_based_on_ndvi: True
-    do_drop_small_samples: False
-    do_global_stats: True 
+    do_produce_tif: True
   metadata:
+    preprocess_mode: training  # choose in {'training', 'inference'}
+    batch_size: 0   # if 0, load everything at once
     sample_size: 512  # 128 and higher
-    rangelimit_mode: none # one of {none, clip, norm, log_norm, self_max_norm}
-    rangelimit_threshold: 10000
     epsg: 2056
-    sample_size_threshold: 5000  # area in pixels^2 bellow which the sample is dropped
   multiprocessing:
     max_workers: 0 # if 0, uses all the available cores but might overload the RAM
   security:

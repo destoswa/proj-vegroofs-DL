@@ -1,3 +1,0 @@
-pip install numpy pandas geopandas matplotlib tqdm rasterio pillow shapely scikit-image scikit-learn loguru tifffile pytest-shutil seaborn omegaconf
-pip install hydra-core --upgrade
-pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118

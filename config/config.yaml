@@ -5,7 +5,6 @@ defaults:
 
 do_preprocess: True
 sweeping_var: []
-#mode: combination  # choose in {'combination', 'combinatory'}
 
 hydra:
   output_subdir: null

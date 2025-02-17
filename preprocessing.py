@@ -1,27 +1,28 @@
 import os
 import shutil
-import pickle
 import warnings
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 import geopandas as gpd
 import dask_geopandas as dg
 from tqdm import tqdm
-import rasterio
-from rasterio.mask import mask
-from rasterio.merge import merge
-from shapely import geometry
 from loguru import logger
-from tifffile import imread, imwrite
-import concurrent.futures
-from skimage.transform import resize
-from skimage import util
-from src.preprocess_utils import range_limiting, ndvi_samp_gen, lum_samp_gen, ndvi_to_mask, mask_nbh_rounding, da_rotation, da_flipping
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from multiprocessing import Manager
+from functools import partial
+from itertools import islice
+from src.preprocess_utils import da_rotation, da_flipping, clip_roofs_to_raster, processes_on_sample
 from omegaconf import DictConfig, OmegaConf
 
 
-def preprocess(cfg:DictConfig):
+def chunks(data, size):
+    """Yield successive chunks of data."""
+    it = iter(data.index)
+    for _ in range(0, len(data), size):
+        yield data.loc[islice(it, size)]
+
+
+def preprocess(cfg: DictConfig):
     """
     This function handles the preprocessing of geospatial raster and polygon data based on the given configuration (cfg) in order to
     extract ready-to-be-used samples for the training of classification models. 
@@ -31,18 +32,24 @@ def preprocess(cfg:DictConfig):
     as well as saving metadata to correspond a sample with its label using the EGID number of the building as unique identifier. 
 
     Args:
-        - cfg (DictConfig): Configuration dictionary containing paths for inputs, outputs, processes to perform (like NDVI, luminosity), and metadata such as sample size and EPSG code.
+        - cfg (DictConfig): Configuration dictionary containing paths for inputs, outputs, processes to perform (like NDVI, luminosity), 
+        and metadata such as sample size and EPSG code.
 
     Returns:
         - None
     """
     logger.info('Starting preprocessing...')
 
-    # security
+    # Security
     if cfg['security']['do_abort']:
         quit()
 
-    # load source and target files/dir
+    # Change current directory:
+    current_directory = os.getcwd()
+    WORKING_DIRECTORY = cfg['working_directory']
+    os.chdir(WORKING_DIRECTORY)
+
+    # Load source and target files/dir
     INPUTS = cfg['inputs']
     POLYGON_SRC = INPUTS['polygon_src']
     RASTER_DIR = INPUTS['rasters_dir']
@@ -52,103 +59,112 @@ def preprocess(cfg:DictConfig):
     OUTPUTS = cfg['outputs']
     OUTPUT_DIR = OUTPUTS['output_dir']
 
-    # load processes flags
+    # Load processes flags
     PROCESSES = cfg['processes']
-    DO_RANGELIMIT = PROCESSES['do_rangelimit']
-    DO_MASK = PROCESSES['do_mask']
-    DO_SMOOTH_MASK = PROCESSES['do_smooth_mask']
     DO_DA_ROTATION = PROCESSES['do_da_rotation']
     DO_DA_FLIPPING = PROCESSES['do_da_flipping']
     DO_DROP_OVERLAPPING = PROCESSES['do_drop_overlapping']
     DO_DROP_BASED_ON_NDVI = PROCESSES['do_drop_based_on_ndvi']
+    DO_PRODUCE_TIF = PROCESSES['do_produce_tif']
 
-    # load metadata
+    # Load metadata
     METADATA = cfg['metadata']
+    PREPROCESS_MODE = METADATA['preprocess_mode']
+    BATCH_SIZE = METADATA['batch_size']
     SAMPLE_SIZE = METADATA['sample_size']
-    RANGELIMIT_MODE = METADATA['rangelimit_mode']
-    RANGELIMIT_THRESHOLD = METADATA['rangelimit_threshold']
     EPSG = METADATA['epsg']
 
-    # messages for processes:
-    if DO_MASK:
-        if DO_SMOOTH_MASK:
-            logger.info("_with smooth masking")
-        else:
-            logger.info("_with masking")
+    # Load multiprocessing metadata
+    MULTIPROCESSING = cfg['multiprocessing']
+    MAX_WORKERS = MULTIPROCESSING['max_workers']
+    MAX_WORKERS = None if MAX_WORKERS == 0 else MAX_WORKERS
+
+    # Messages for processes:
     if DO_DA_ROTATION:
         logger.info("_with data augmentation (rotation)")
     if DO_DA_FLIPPING:
         logger.info("_with data augmentation (flipping)")
     if DO_DROP_OVERLAPPING:
-        logger.info("_with dropping out of the samples overlapping multiple rasters")
-    if DO_DROP_BASED_ON_NDVI:
-        logger.info("_with dropping out of the 'bare' samples with mean NDVI greater than 0.05")
-    
-    # asserts and warnings if incompatibilities in or between parameters
-    assert isinstance(SAMPLE_SIZE, int)
-    assert isinstance(RANGELIMIT_THRESHOLD, int)
+        logger.info(
+            "_with dropping out of the samples overlapping multiple rasters")
+
+    # Asserts and warnings if incompatibilities in or between parameters
     assert isinstance(EPSG, int)
-    assert RANGELIMIT_MODE in ["none", "clip", "norm", "log_norm", "self_max_norm"]
+
     if SAMPLE_SIZE < 128:
-        warnings.warn("The sample size is set lower than 128. It might results in errors during the training.")
+        warnings.warn(
+            "The sample size is set lower than 128. It might results in errors during the training.")
 
-
-    # categories of samples
+    # Categories of samples
     df_categories = pd.read_csv(CLASS_LABELS_DIR, sep=';')
 
-    # create architecture if necessary
+    # Create architecture if necessary
     if os.path.exists(OUTPUT_DIR):
         shutil.rmtree(OUTPUT_DIR)
     cat_dir = {}
     cat_dir['.'] = OUTPUT_DIR
 
-    for let, cat in df_categories[['code_char','cat']].values:
-        cat_dir[let] = OUTPUT_DIR + "/" + cat
+    if PREPROCESS_MODE == 'training':
+        df_categories = pd.read_csv(CLASS_LABELS_DIR, sep=';')
+        for let, cat in df_categories[['code_char', 'cat']].values:
+            cat_dir[let] = OUTPUT_DIR + "/" + cat
+    elif PREPROCESS_MODE == 'inference':
+        cat_dir['data'] = OUTPUT_DIR + '/data'
+    else:
+        raise ValueError('Wrong value for "preprocessing-mode" parameter.')
 
     for dir in cat_dir.values():
         if not os.path.exists(dir):
-            os.mkdir(dir) 
+            os.mkdir(dir)
 
-    # save categories to csv
-    df_categories.to_csv(os.path.join(OUTPUT_DIR, "class_names.csv"), sep=';', index=False)
-    
-    # get rasters
-    raster_list = []
-
+    # Get rasters
+    raster_src_list = []
     for r, d, f in os.walk(RASTER_DIR):
         for file in f:
             if file.endswith('.tif'):
                 file_src = r + '/' + file
-                file_src = file_src.replace('\\','/')
-                raster_list.append(rasterio.open(file_src))
+                file_src = file_src.replace('\\', '/')
+                raster_src_list.append(file_src)
 
-    # get polygons of roofs
+    if len(raster_src_list) == 0:
+        raise ValueError('No .tif file found at raster_dir location!')
+
+    # Get polygons of roofs
     roofs = gpd.read_file(POLYGON_SRC).to_crs(EPSG)
     roofs.EGID = roofs.EGID.astype(int)
 
-    # saving samples metadata:
-    roofs[['EGID','class','area', 'year']].to_csv(os.path.join(OUTPUT_DIR,"samples_metadata.csv"), sep=';', index=False, encoding='utf-8-sig')
+    # Create dataframe to store metas of samples
+    if PREPROCESS_MODE == 'training':
+        # Prepare dataset
+        df_dataset = pd.DataFrame(roofs[['EGID', 'class']])
+        df_dataset.insert(2, 'file_src', '-')
+        df_dataset.insert(3, 'label', 0)
 
-    # create dataframe to store metas of samples
-    df_dataset = pd.DataFrame(roofs[['EGID', 'class']])
-    df_dataset.insert(2,'file_src', '-')
-    df_dataset.insert(3,'label', 0)
+        # Add row with class code in dataframe:
+        for let, num in df_categories[['code_char', 'code_num']].values:
+            df_dataset.loc[df_dataset['class'] == let, 'label'] = num
 
-    # add row with class code in dataframe:
-    for let, num in df_categories[['code_char','code_num']].values:
-        df_dataset.loc[df_dataset['class'] == let, 'label'] = num
-    
-    # create samples by looping on polygons
-    logger.info("_Clipping samples...")
+        # Saving samples metadata:
+        roofs[['EGID', 'class', 'area', 'year']].to_csv(os.path.join(
+            OUTPUT_DIR, "samples_metadata.csv"), sep=';', index=False, encoding='utf-8-sig')
+
+        # Save categories to csv
+        df_categories.to_csv(os.path.join(
+            OUTPUT_DIR, "class_names.csv"), sep=';', index=False)
+    else:
+        df_dataset = pd.DataFrame(roofs[['EGID']])
+        df_dataset.insert(1, 'file_src', '-')
+        roofs['class'] = '-'
+
+    overhanging_trees = []
+    toosmall_samples = []
     overlapping_roofs = []
     nonmatching_roofs = []
-    overhanging_trees = []
-    list_egids_not_overlapping_completely = []
-    histogram_range_values, histogram_range_bins = np.histogram(0, bins=100, range=(0, RANGELIMIT_THRESHOLD))
-    for roof in tqdm(roofs.itertuples(index=True), total=len(roofs), desc="Clipping"):
+    sample_format = ""
 
-        # compute bbox of the roof
-        geom = roof.geometry
+    # Test batch size
+    if BATCH_SIZE == 0 or BATCH_SIZE > len(roofs):
+        BATCH_SIZE = len(roofs)
 
     # Loop on batches
     if BATCH_SIZE == 0:
@@ -173,162 +189,87 @@ def preprocess(cfg:DictConfig):
         nonmatching_roofs.append(sub_nonmatching_roofs)
         overlapping_roofs.append(sub_overlapping_roofs)
 
-        # loop over the rasters to find the one matching
-        matching_rasters = []
-        matching_images = []
-        sample_formats = ""
-        for raster in raster_list:
-            # catch the error when polygon doesn't match raster and just continue to next raster
-            try:
-                out_image, out_transform = mask(raster, [geom], crop=True)
-                sample_formats = out_image.dtype
-            except ValueError:
-                continue
-            else:
-                if np.count_nonzero(out_image) / np.size(out_image) < 0.1: # drop if less than 5% non-zero pixels
-                    nonmatching_roofs.append(egid)
-                    continue
-                matching_rasters.append(raster)
-                matching_images.append((out_image, out_transform))
+        # Use Manager to create a shared dictionary
+        with Manager() as manager:
+            shared_dict = manager.dict()
 
-        # test if polygon match with one or multiple rasters:    
-        if len(matching_rasters) == 0:
-            nonmatching_roofs.append(egid)
-            continue
-        if len(matching_rasters) > 1:
-            if DO_DROP_OVERLAPPING and sample_formats != 'uint16':
-                overlapping_roofs.append(egid)
-                continue
-            else:
-                img_size_max = np.sum(matching_images[0][0].shape)
-                for img, transf in matching_images:
-                    if np.sum(img.shape) > img_size_max:
-                        img_size_max = np.sum(img.shape)
-                        out_image = img
-                        out_transform = transf
-                        list_egids_not_overlapping_completely.append(egid)
+            with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+                part_func = partial(processes_on_sample,
+                                    cfg=cfg,
+                                    cat_dir=cat_dir,
+                                    shared_dict=shared_dict,
+                                    df_categories=df_categories,
+                                    overlapping_roofs=overlapping_roofs,
+                                    )
+
+                futures = {executor.submit(part_func, egid, sample)
+                           for egid, sample in samples.items()}
+
+                for future in tqdm(as_completed(futures), total=len(futures), desc="  Processing"):
+                    result = future.result()
+                    if result:
+                        dict_aborted = result
+                        if dict_aborted['overhanging_tree'] != '':
+                            overhanging_trees.append(
+                                dict_aborted['overhanging_tree'])
+                        if dict_aborted['toosmall_sample'] != '':
+                            toosmall_samples.append(
+                                dict_aborted['toosmall_sample'])
+
+            for egid, src in shared_dict.items():
+                df_dataset.loc[df_dataset.EGID == egid, 'file_src'] = src
         
-        num_layers = out_image.shape[0]
-
-
-        # range-limiting
-        if DO_RANGELIMIT and sample_formats == "uint16":
-            out_image = range_limiting(out_image, RANGELIMIT_THRESHOLD, RANGELIMIT_MODE)
-        histogram_range_values += np.histogram(out_image, bins=100, range=(0, RANGELIMIT_THRESHOLD))[0]
-        
-
-        # compute NDVI
-        ndvi_canal = ndvi_samp_gen(out_image)
-        out_image = np.concatenate([out_image, ndvi_canal])
-        num_layers = num_layers + 1
-
-        # compute luminosity
-        lum_canal = lum_samp_gen(out_image)
-        out_image = np.concatenate([out_image, lum_canal])
-        num_layers = num_layers + 1
-
-        # dropping out bare samples based on ndvi value
-        if DO_DROP_BASED_ON_NDVI and cat == 'b':
-            if np.nanmean(ndvi_canal) > 0.05:
-                overhanging_trees.append(egid)
-                continue
-
-        # apply mask
-        if DO_MASK:                
-            # get ndvi      
-            ndvi_arr = out_image[4, ...]
-            
-            # compute masks
-            mask_arr = ndvi_to_mask(ndvi_arr)
-            if DO_SMOOTH_MASK:
-                if not DO_MASK:
-                    raise ValueError("The mask needs to be computed in order to apply a smooth mask!")
-                mask_arr = mask_nbh_rounding(mask_arr)
-
-            # apply masks on each band
-            for i in range(out_image.shape[0]):
-                out_image[i,mask_arr] = 0
-        
-        # normalize sample
-        out_image = resize(out_image, [num_layers, SAMPLE_SIZE, SAMPLE_SIZE], anti_aliasing=False)
-
-        # place sample to corresponding folder
-        if cat in cat_dir.keys():
-            target_tif_src = cat_dir[cat] + '/' + egid + '.tif'
-            target_pkl_src = cat_dir[cat] + '/' + egid + '.pickle'
-            df_dataset.loc[df_dataset.EGID == float(egid), 'file_src'] = df_categories.loc[df_categories.code_char == cat, 'cat'].values[0] + '/' + egid + '.pickle'
-            
-        else:
-            raise ValueError(f"no category with letter '{cat}' !")
-        
-
-        out_meta = raster.meta.copy()
-        out_meta.update({
-            "driver": "GTiff",
-            "width": out_image.shape[2],
-            "height": out_image.shape[1],
-            "count": num_layers,
-            "transform": out_transform,
-            "crs": rasterio.CRS.from_epsg(2056),
-        })
-
-        # create .tif file for visualization
-        with rasterio.open(target_tif_src, "w", **out_meta) as dst:
-            dst.write(out_image)
-
-        # create pickle file to keep the numpy array (without rasterio 8-bit transformation)
-        with open(target_pkl_src, 'wb') as dst:
-            pickle.dump(out_image, dst)
-    
-    #print(f"List of egids not completely overlapping : {list_egids_not_overlapping_completely}")
-
-    # saving histogram of range of values
-    histogram_range_values = (histogram_range_values.astype(float) / len(roofs)).astype(int)
-    bands = ['Red', 'Green', 'Blue', 'NIR']
-    fig, axs = plt.subplots(4,1)
-    for i in range(4):
-        axs[i].bar(histogram_range_bins[:-1], histogram_range_values, width=10, log=True)
-        axs[i].set_title(bands[i])
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIR,'histogram_range_values.png'))
-    plt.close()
-
-    # saving labelized info to csv:
-    df_dataset = df_dataset.loc[df_dataset.file_src != '-',:]
-    
     # add column for keeping track of original egid:
     df_dataset['original_egid'] = df_dataset.loc[:,'EGID'].astype(int).astype('str')
 
+    # saving labelized info to csv:
+    df_dataset = df_dataset.loc[df_dataset.file_src != '-',:]
+
+    # saving dataset infos
     df_dataset.to_csv(os.path.join(OUTPUT_DIR, "dataset.csv"), index=False, sep=';')
-
-    # data augmentation
-    # _rotation:
+    
+    # Data augmentation
+    #   _rotation:
     if DO_DA_ROTATION:
-        logger.info("Data augmentation (rotation)...")
-        da_rotation(OUTPUT_DIR, df_categories)
-
-    # _flipping:
-    if DO_DA_FLIPPING:
-        logger.info("Data augmentation (flipping)...")
-        da_flipping(OUTPUT_DIR, df_categories)
+        da_rotation(OUTPUT_DIR, df_categories, MAX_WORKERS, DO_PRODUCE_TIF)
         
-    # show summary
-    logger.info("In total:")
-    logger.info(f"\t{len(nonmatching_roofs)} non-matching roofs dropped.")
+    #   _flipping:
+    if DO_DA_FLIPPING:
+        da_flipping(OUTPUT_DIR, df_categories, MAX_WORKERS, DO_PRODUCE_TIF)
 
-    if DO_DROP_OVERLAPPING and sample_formats != 'uint16':
+    # flattening lists
+    nonmatching_roofs = [val for row in nonmatching_roofs for val in row]
+    overlapping_roofs = [val for row in overlapping_roofs for val in row]
+
+    # Show summary
+    logger.info("In total:")
+    logger.info(f"\t{len(roofs)} roofs processed.")
+    logger.info(f"\t{len(nonmatching_roofs)} non-matching roofs dropped.")
+    if len(nonmatching_roofs) > 0:
+        with open(os.path.join(OUTPUT_DIR, 'nonmatching_roofs.txt'), 'w') as file:
+            file.write(str(nonmatching_roofs))
+
+    if DO_DROP_OVERLAPPING and sample_format != 'uint16':
         logger.info(f"\t{len(overlapping_roofs)} overlapping roofs dropped.")
+        if len(overlapping_roofs) > 0:
+            with open(os.path.join(OUTPUT_DIR, 'overlapping_roofs.txt'), 'w') as file:
+                file.write(str(overlapping_roofs))
 
     if DO_DROP_BASED_ON_NDVI:
-        logger.info(f"\t{len(overhanging_trees)} bare roofs with overhanging trees dropped.")
-    logger.info("Preprocessing done.")
-    
-    print("Non-matching :")
-    print(nonmatching_roofs)
+        logger.info(
+            f"\t{len(overhanging_trees)} bare roofs with overhanging trees dropped.")
+        if len(overhanging_trees) > 0:
+            with open(os.path.join(OUTPUT_DIR, 'overhanging_trees.txt'), 'w') as file:
+                file.write(str(overhanging_trees))
 
-    # save copy of config file
+    logger.info("Preprocessing done.")
+
+    # Save copy of config file
     with open(os.path.join(OUTPUT_DIR, "config.yaml"),'w+') as file:
         OmegaConf.save(cfg, file.name)
+
+    # Resetting the current directory
+    os.chdir(current_directory)
 
 
 if __name__ == '__main__':

@@ -1,6 +1,5 @@
 import os
 import numpy as np
-import pandas as pd
 import geopandas as gpd
 from tqdm import tqdm
 from datetime import date
@@ -9,7 +8,7 @@ import time
 import torch
 import torchvision.transforms as transforms
 from models.ASPP_Classifier import ASPP_Classifier
-from src.inference_preprocess import preprocess
+from preprocessing import preprocess
 from src.dataset import GreenRoofsDataset
 from src.dataset_utils import ToTensor, Normalize
 from omegaconf import DictConfig, OmegaConf
@@ -23,7 +22,7 @@ def inference(cfg:DictConfig):
         logger.info("Cuda available")
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # load arguments
+    # Load arguments
     INFERENCE = cfg['inference']
     WORKING_DIRECTORY = INFERENCE['working_directory']
     INPUTS = INFERENCE['inputs']
@@ -47,15 +46,11 @@ def inference(cfg:DictConfig):
 
     PREPROCESS_OVERRIGHT = INFERENCE['preprocess_overright']
     PREPROC_PROCESSES = PREPROCESS_OVERRIGHT['processes']
-    DO_RANGELIMIT = PREPROC_PROCESSES['do_rangelimit']
-    DO_MASK = PREPROC_PROCESSES['do_mask']
-    DO_SMOOTH_MASK = PREPROC_PROCESSES['do_smooth_mask']
     DO_DROP_OVERLAPPING = PREPROC_PROCESSES['do_drop_overlapping']
     DO_DROP_BASED_ON_NDVI = PREPROC_PROCESSES['do_drop_based_on_ndvi']
     METADATA = PREPROCESS_OVERRIGHT['metadata']
+    PREPROCESS_BATCH_SIZE = METADATA['batch_size']
     SAMPLE_SIZE = METADATA['sample_size']
-    RANGELIMIT_MODE = METADATA['rangelimit_mode']
-    RANGELIMIT_THRESHOLD = METADATA['rangelimit_threshold']
     MULTI_PROCESSING = PREPROCESS_OVERRIGHT['multi_processing']
     MAX_WORKERS = MULTI_PROCESSING['max_workers']
 
@@ -63,10 +58,12 @@ def inference(cfg:DictConfig):
     NORM_BOUNDARIES = np.array(TRAIN_OVERRIGHT['norm_boundaries'])
     BATCH_SIZE = TRAIN_OVERRIGHT['batch_size']
     NUM_WORKERS = TRAIN_OVERRIGHT['num_workers']
-    BACKBONE = TRAIN_OVERRIGHT['backbone']
     BACKBONE_NUM_LEVELS = TRAIN_OVERRIGHT['backbone_num_levels']
     BACKBONE_NUM_LAYERS = TRAIN_OVERRIGHT['backbone_num_layers']
     ASPP_ATROUS_RATES = TRAIN_OVERRIGHT['aspp_atrous_rates']
+
+    current_dir = os.getcwd()
+    os.chdir(WORKING_DIRECTORY)
 
     # create result architecture
     #   _create folder name
@@ -78,17 +75,17 @@ def inference(cfg:DictConfig):
         i += 1
     folder_name = new_folder_name + "/"
     preds_root_dir = os.path.join(PREDS_DIR, folder_name)
-    os.mkdir(preds_root_dir)
+    os.makedirs(preds_root_dir)
 
-    # load the polygon and create column for prediction
+    # Preprocessing
+    #   _load the polygon and create column for prediction
     df_roofs = gpd.read_file(POLYGON_SRC)
 
     pred_column_name = 'Preds_'+ MODE
     df_roofs[pred_column_name] = np.nan
     df_roofs.EGID = df_roofs.EGID.astype(int)
 
-    # preprocessing
-    # _loading and overrighting of the preprocess configuration
+    #   _load and overrighting of the preprocess configuration
     cfg_preprocess = OmegaConf.load('./config/preprocessing.yaml')
     cfg_preprocess.preprocessing.working_directory = WORKING_DIRECTORY
     cfg_preprocess.preprocessing.inputs.polygon_src = POLYGON_SRC
@@ -96,24 +93,21 @@ def inference(cfg:DictConfig):
     cfg_preprocess.preprocessing.inputs.chm_src = CHM_SRC
     cfg_preprocess.preprocessing.inputs.class_labels_dir = CLASS_LABELS_DIR
     cfg_preprocess.preprocessing.outputs.output_dir = DATASET_DIR
-    cfg_preprocess.preprocessing.processes.do_rangelimit = DO_RANGELIMIT
-    cfg_preprocess.preprocessing.processes.do_mask = DO_MASK
-    cfg_preprocess.preprocessing.processes.do_smooth_mask = DO_SMOOTH_MASK
     cfg_preprocess.preprocessing.processes.do_drop_overlapping = DO_DROP_OVERLAPPING
     cfg_preprocess.preprocessing.processes.do_drop_based_on_ndvi = DO_DROP_BASED_ON_NDVI
     cfg_preprocess.preprocessing.processes.do_da_rotation = False
     cfg_preprocess.preprocessing.processes.do_da_flipping = False
+    cfg_preprocess.preprocessing.metadata.preprocess_mode = 'inference'
+    cfg_preprocess.preprocessing.metadata.batch_size = PREPROCESS_BATCH_SIZE
     cfg_preprocess.preprocessing.metadata.sample_size = SAMPLE_SIZE
-    cfg_preprocess.preprocessing.metadata.rangelimit_mode = RANGELIMIT_MODE
-    cfg_preprocess.preprocessing.metadata.rangelimit_threshold = RANGELIMIT_THRESHOLD
     cfg_preprocess.preprocessing.multiprocessing.max_workers = MAX_WORKERS
     cfg_preprocess.preprocessing.security.do_abort = False
 
     if DO_PREPROCESSING:
         preprocess(cfg_preprocess.preprocessing)
 
-    # create dataset, dataloader and model
-    # _set transform
+    # Create dataset, dataloader and model
+    #   _set transform
     transform = transforms.Compose([
         Normalize(NORM_BOUNDARIES),
         ToTensor(),
@@ -124,7 +118,7 @@ def inference(cfg:DictConfig):
                                     transform=transform,
                                     )
     
-    # _test if dataset found
+    #   _test if dataset found
     if len(dataset_preds) == 0:
         logger.info("The dataset is empty. It might be due to a mistake in the rasters path or polygons path or no overlapp between the two.")
         quit()
@@ -142,20 +136,19 @@ def inference(cfg:DictConfig):
         output_channels=output_channels,
         img_size=img_size,
         batch_size=BATCH_SIZE,
-        backbone=BACKBONE,
         bb_levels=BACKBONE_NUM_LEVELS,
         bb_layers=BACKBONE_NUM_LAYERS,
         aspp_atrous_rates=ASPP_ATROUS_RATES,
         mode=MODE,
     ).double().to(torch.device(DEVICE))
 
-    # _load trained model
+    #   _load trained model
     assert(os.path.exists(MODEL_SRC))
     checkpoint = torch.load(MODEL_SRC, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
 
-    # predictions
+    # Predictions
     lst_egids = []
     lst_preds = []
     lst_preds_conf = []
@@ -170,12 +163,12 @@ def inference(cfg:DictConfig):
                 lst_preds.append(preds.tolist())
                 lst_preds_conf.append(preds_conf.tolist())
 
-    # flatten lists
+    # Flatten lists
     lst_egids = [samp for row in lst_egids for samp in row]
     lst_preds = [samp for row in lst_preds for samp in row]
     lst_preds_conf = [samp for row in lst_preds_conf for samp in row]
     
-    # number to char
+    # Number to char
     if MODE == 'multi':
         dict_num_to_char = {
             0: 'b',
@@ -193,7 +186,7 @@ def inference(cfg:DictConfig):
 
     lst_preds = [dict_num_to_char[x] for x in lst_preds]
 
-    # add results to roofs
+    # Add results to roofs
     df_preds = gpd.GeoDataFrame({
          'EGID': lst_egids,
          pred_column_name: lst_preds,
@@ -204,8 +197,8 @@ def inference(cfg:DictConfig):
     df_roofs = df_roofs.drop(columns=[pred_column_name + '_duplicate'], axis=1)
     df_roofs = df_roofs.dropna(subset=pred_column_name).reset_index(drop=True)
 
-    # saving results
-    new_name = ''.join(POLYGON_SRC.split('/')[-1].split('.')[:-1])
+    # Saving results
+    new_name = ''.join(POLYGON_SRC.split('/')[-1].split('\\')[-1].split('.')[:-1])
     ext = POLYGON_SRC.split('.')[-1]
     new_name_file = ''.join(new_name) + '_preds.' + ext
     new_name_csv = ''.join(new_name) + '_preds.csv'
@@ -213,10 +206,25 @@ def inference(cfg:DictConfig):
     df_roofs.to_csv(os.path.join(preds_root_dir, new_name_csv), sep=';', index=None)
     logger.info(f"Resulting fils saved in {preds_root_dir}")
 
-    # figures
+    # Figures
     pass
+
+    # Return to current directory
+    os.chdir(current_dir)
 
 
 if __name__ == '__main__':
     cfg = OmegaConf.load('./config/inference.yaml')
+    time_begining = time.time()
+
+    # Run inference
     inference(cfg)
+
+    # Print time to process
+    time_elapsed = time.time() - time_begining
+    n_hours = int(time_elapsed / 3600)
+    n_min = int((time_elapsed % 3600) / 60)
+    n_sec = int(time_elapsed - n_hours * 3600 - n_min * 60)
+    print("\n==============")
+    print(f'Inference completed in {n_hours}:{n_min}:{n_sec}')
+    print("==============")
