@@ -135,7 +135,6 @@ def inference(cfg:DictConfig):
         input_channels=input_channels,
         output_channels=output_channels,
         img_size=img_size,
-        batch_size=BATCH_SIZE,
         bb_levels=BACKBONE_NUM_LEVELS,
         bb_layers=BACKBONE_NUM_LAYERS,
         aspp_atrous_rates=ASPP_ATROUS_RATES,

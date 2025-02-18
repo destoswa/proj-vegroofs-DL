@@ -471,6 +471,10 @@ def train(cfg: DictConfig):
             + FOLDER_NAME_SUFFIX
         )
         new_folder_name = folder_name
+        
+        if not os.path.exists(RES_DIR):
+            os.makedirs(RES_DIR)
+
         i = 1
         while os.path.exists(RES_DIR + new_folder_name):
             new_folder_name = folder_name + "_" + str(i)

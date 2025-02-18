@@ -115,7 +115,7 @@ def preprocess(cfg: DictConfig):
 
     for dir in cat_dir.values():
         if not os.path.exists(dir):
-            os.mkdir(dir)
+            os.makedirs(dir)
 
     # Get rasters
     raster_src_list = []

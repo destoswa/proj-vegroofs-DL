@@ -1,10 +1,10 @@
 preprocessing:
-  working_directory: D:/GitHubProjects/STDL_Classifier_test_2/proj_vegroofs_dl
+  working_directory: D:/GitHubProjects/proj-vegroofs-DL
   inputs:
-    polygon_src: data/sources/gt_matching_roofs.gpkg
-    rasters_dir: data/sources/scratch_dataset
-    chm_src : data\sources\CHM\CHM_trainingset.gpkg
-    class_labels_dir: data/sources/class_labels_multi.csv
+    polygon_src: data\sources\example\polygons\roofs_example.gpkg
+    rasters_dir: data\sources\example\rasters
+    chm_src : data\sources\example\polygons\chm_example.gpkg
+    class_labels_dir: data\sources\class_labels_multi.csv
   outputs:
     output_dir: data/dataset_test
   processes:
@@ -17,7 +17,7 @@ preprocessing:
   metadata:
     preprocess_mode: training  # choose in {'training', 'inference'}
     batch_size: 0   # if 0, load everything at once
-    sample_size: 512  # 128 and higher
+    sample_size: 128  # 128 and higher
     epsg: 2056
   multiprocessing:
     max_workers: 0 # if 0, uses all the available cores but might overload the RAM

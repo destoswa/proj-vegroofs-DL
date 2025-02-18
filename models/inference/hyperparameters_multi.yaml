@@ -1,0 +1,76 @@
+preprocessing:
+  working_directory: /mnt/data-volume-02/destouch/proj_vegroofs_DL/data/
+  inputs:
+    polygon_src: sources/final_dataset_gt.gpkg
+    rasters_dir: sources/scratch_dataset
+    chm_src: sources/CHM/CHM_trainingset.gpkg
+    class_labels_dir: sources/class_labels_multi.csv
+  outputs:
+    output_dir: dataset_chm
+  processes:
+    image_norm_style: stretching
+    do_rangelimit: false
+    do_mask: false
+    do_smooth_mask: false
+    do_da_rotation: true
+    do_da_flipping: false
+    do_drop_overlapping: false
+    do_drop_based_on_ndvi: true
+    do_drop_small_samples: true
+    do_produce_tif: false
+  metadata:
+    preprocess_mode: training
+    batch_size: 0
+    sample_size: 1024
+    rangelimit_mode: none
+    rangelimit_threshold: 10000
+    epsg: 2056
+    sample_size_threshold: 2000
+  multiprocessing:
+    max_workers: 0
+  security:
+    do_abort: false
+training:
+  working_directory: /mnt/data-volume-02/destouch/proj_vegroofs_DL/
+  inputs:
+    dataset_root: data/dataset_chm
+    pretrained_src: DL/models/model.tar
+  outputs:
+    res_dir: results/trainings/
+    folder_name_suffix: final_with_chm_overlay
+  processes:
+    do_preprocessing: true
+  parameters:
+    norm_boundaries:
+    - - 0
+      - 255
+    - - 0
+      - 255
+    - - 0
+      - 255
+    - - 0
+      - 255
+    - - -1
+      - 1
+    - - 0
+      - 765
+    data_frac: 1.0
+    train_frac: 0.7
+    num_epochs: 100
+    batch_size: 8
+    num_workers: 8
+    learning_rate: 0.0001
+    weight_decay: 0.0001
+    from_pretrained: false
+  training_mode: single
+  model:
+    model_type: multi
+    backbone: convslayers
+    backbone_num_levels: 3
+    backbone_num_layers: 1
+    aspp_atrous_rates:
+    - 4
+    - 8
+    - 12
+    dropout_frac: 0.0
+    model_src: src/models/DeepLabV3Classificator.py

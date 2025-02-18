@@ -1,8 +1,8 @@
 training:
-  working_directory: D:/GitHubProjects/STDL_Classifier_test_2/proj_vegroofs_dl
+  working_directory: D:/GitHubProjects/proj-vegroofs-DL
   inputs:
-   dataset_root: data/dataset_test
-   pretrained_src: DL/models/model.tar
+    dataset_root: data/dataset_test
+    pretrained_src: DL/models/model.tar
   outputs:
     res_dir: results/trainings/
     folder_name_suffix: test
@@ -10,7 +10,7 @@ training:
     do_preprocessing: False  # only working with single trainings
   parameters:
     norm_boundaries: [[0,255],[0,255],[0,255],[0,255],[-1,1],[0,765]]
-    data_frac: 0.1
+    data_frac: 1.0
     train_frac: 0.7
     num_epochs: 2
     batch_size: 4

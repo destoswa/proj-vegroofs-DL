@@ -416,13 +416,13 @@ def show_uncertainty(dict_preds_conf, target_src, do_show=True, do_save=False):
         dict_scores['Brier score'].append(brier_score_multiclass(y_true=targets, y_pred=preds_conf))
         dict_scores['ECE'].append(expected_calibration_error(y_true=targets, y_pred_lbl=preds, y_pred=preds_conf))
         dict_scores['APE'].append(average_prediction_entropy(pred_probs=preds_conf))
-        dict_scores['NNL'].append(multiclass_nll(y_true=targets, y_pred=preds_conf))
+        dict_scores['NLL'].append(multiclass_nll(y_true=targets, y_pred=preds_conf))
         dict_scores['UAA'].append(uncertainty_aware_accuracy(predicted_labels=preds, pred_probs=preds_conf, true_labels=targets)[0])
 
     min_brier = min(dict_scores['Brier score'])
     min_ECE = min(dict_scores['ECE'])
     min_APE = min(dict_scores['APE'])
-    min_NNL = min(dict_scores['NNL'])
+    min_NNL = min(dict_scores['NLL'])
     max_UAA = max(dict_scores['UAA'])
     fig, axs = plt.subplots(3, 2)
     for idx, (score_name, score_val) in enumerate(dict_scores.items()):
