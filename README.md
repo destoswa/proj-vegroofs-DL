@@ -1,4 +1,5 @@
 # Deep learning base method for green roofs classification
+This project provides a suite of Python scripts allowing the end-user to use deep learning to detect green roofs on land survey building footprint based on orthophotos, whereas the [proj-vegroofs](https://github.com/swiss-territorial-data-lab/proj-vegroofs/) repositery documents an alternative approach based on machine learning techniques.
 
 ## Installation
 ### downolading data
