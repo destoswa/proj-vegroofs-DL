@@ -27,7 +27,7 @@ def main():
     if not os.path.exists('./data/sources/example/rasters'):
         os.makedirs('./data/sources/example/rasters')
     if not os.path.exists('./data/sources/example/AOI'):
-        os.makedirs('./data/sources/example/AOI')
+        os.makedirs('./data/sources/example/polygons')
 
     # Load rasters
     print("Loading rasters ..")
@@ -37,7 +37,12 @@ def main():
 
     # Load AOI
     print("Loading AOI")
-    download_file("https://data.stdl.ch/proj-vegroof/example/aoi/roofs_example.gpkg", "./data/sources/example/AOI")
+    download_file("https://data.stdl.ch/proj-vegroof/example/polygons/roofs_example.gpkg", "./data/sources/example/polygons")
+    print("Done!")
+
+    # Load CHM
+    print("Loading CHM")
+    download_file("https://data.stdl.ch/proj-vegroof/example/polygons/chm_example.gpkg", "./data/sources/example/polygons")
     print("Done!")
 
 
